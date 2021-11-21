@@ -4,7 +4,7 @@ using Kari.Plugins.DataObject;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Runtime.CompilerServices;
-
+using BF = Kari.Plugins.Bitfield;
 namespace Stuff
 {
     public static class H
@@ -312,6 +312,53 @@ namespace Stuff
             ref var entry = ref GetEntry(entity);
             return entry.isDead || entry.version != entity.Version;
         }
+    }
+
+    public interface IMessageDispatcher
+    {
+        void Dispatch(Span<byte> messageBytes);
+    }
+
+    public interface IMessageDispatcher<TMessageData> : IMessageDispatcher
+    {
+        void Dispatch(ref TMessageData message); 
+    }
+
+    public interface ISubscriber<TMessageData>
+    {
+        bool Handle(ref TMessageData message);
+    }
+
+    [DataObject]
+    public readonly partial struct SubscriberData<THandler>
+    {
+        public readonly int Metadata;
+        public readonly THandler Handler;
+        public SubscriberData(int metadata, THandler handler)
+        {
+            Metadata = metadata;
+            Handler = handler;
+        }
+    }
+
+    [BF.Specification("MessageIdentifier")]
+    public interface IMessageIdentifier
+    {
+        [BF.Bit] bool IsBroadcastable { get; set; }
+        [BF.Bit] bool IsDirect { get; set; }
+        [BF.Bit] bool IsSelfReference { get; set; }
+        [BF.Bits(29)] int Number { get; set; }
+    }
+
+    public readonly struct MessageTypeIndex<TMessageData>
+    {
+
+    }
+
+    public class BroadcastEventTable<TMessageData, THandler> : IMessageDispatcher<TMessageData>
+        where THandler : ISubscriber<TMessageData>
+    {
+        public Dictionary<EntityId, SubscriberData<THandler>[]> _
     }
 
     class Program

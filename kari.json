@@ -1,6 +1,9 @@
 {
     "input": ".",
     "monolithicProject": "true",
-    "pluginsLocations": ["../Kari/Build/bin/DataObject/Release/net5.0/Kari.Plugins.DataObject.dll"],
+    "pluginsLocations": [
+        "../Kari/Build/bin/DataObject/Release/net5.0/Kari.Plugins.DataObject.dll",
+        "../Bitfield/Bitfield/bin/Release/net5.0/Kari.Plugins.Bitfield.dll"
+    ],
     "rootNamespace": "Stuff"
 }
