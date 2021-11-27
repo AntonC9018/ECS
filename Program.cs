@@ -5,6 +5,8 @@ using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Runtime.CompilerServices;
 using BF = Kari.Plugins.Bitfield;
+using Stuff.Generated;
+
 namespace Stuff
 {
     public static class H
@@ -142,7 +144,7 @@ namespace Stuff
         // Some systems may prefer to keep the entity around even after it dies.
         // For example, the renderer may want to play some animation after an entity dies.
         // We release a particular entity component only if 
-        public uint refcount;
+        public uint keeparoundCount;
         public bool isDead; // 
     }
 
@@ -163,24 +165,24 @@ namespace Stuff
     
     public class PoolRegistry
     {
-        public uint[] _poolIsRefcount = new uint[1];
+        public uint[] _poolIsKeeparound = new uint[1];
         public List<IItemPool> _pools = new List<IItemPool>(32);
         public int Count => _pools.Count;
 
 
         /// Returns the pool handle
-        public PoolHandle<T> AddPool<T>(T itemPool, bool isRefcount = false) where T : IItemPool
+        public PoolHandle<T> AddPool<T>(T itemPool, bool isKeeparound = false) where T : IItemPool
         {
             int index = _pools.Count;
             _pools.Add(itemPool);
-            if (_poolIsRefcount.Length < _pools.Count * 32)
-                Array.Resize(ref _poolIsRefcount, _poolIsRefcount.Length + 1);
+            if (_poolIsKeeparound.Length < _pools.Count * 32)
+                Array.Resize(ref _poolIsKeeparound, _poolIsKeeparound.Length + 1);
 
-            if (isRefcount)
+            if (isKeeparound)
             {
                 int intIndex = index / 32;
                 int bitIndex = index - intIndex * 32;
-                _poolIsRefcount[intIndex] &= 1u << bitIndex;
+                _poolIsKeeparound[intIndex] &= 1u << bitIndex;
             }
 
             return new PoolHandle<T>(index);
@@ -198,7 +200,7 @@ namespace Stuff
             Assert(index < _pools.Count);
             int intIndex = index / 32;
             int bitIndex = index - intIndex * 32;
-            return ((_poolIsRefcount[intIndex] >> bitIndex) & 1) == 1;
+            return ((_poolIsKeeparound[intIndex] >> bitIndex) & 1) == 1;
         }
     }
 
@@ -222,7 +224,7 @@ namespace Stuff
                 entry.next = (ushort) (i + 1);
                 entry.version = 0;
                 entry.isDead = false;
-                entry.refcount = 0;
+                entry.keeparoundCount = 0;
             }
 
             _numEntities = 0;
@@ -235,7 +237,7 @@ namespace Stuff
             ref var entry = ref _entityRegistryEntries[_freelist];
             var id = new EntityId((uint) entry.version | (_freelist << 16));
             entry.isDead = false;
-            entry.refcount = 0;
+            entry.keeparoundCount = 0;
             _freelist = entry.next;
             _numEntities++;
             return id;
@@ -276,14 +278,14 @@ namespace Stuff
         public uint DecreaseRefcount(EntityId entity)
         {
             ref var entry = ref GetEntry(entity);
-            Assert(entry.refcount > 0);
-            return --entry.refcount;
+            Assert(entry.keeparoundCount > 0);
+            return --entry.keeparoundCount;
         }
 
         public void RemoveEntity(EntityId entity)
         {
             ref var entry = ref GetEntry(entity);
-            Assert(entry.refcount == 0 && entry.isDead);
+            Assert(entry.keeparoundCount == 0 && entry.isDead);
             _entityRegistryEntries[_freelist].next = entity.Slot;
             _freelist = entity.Slot;
             _numEntities--;
@@ -319,7 +321,7 @@ namespace Stuff
         void Dispatch(Span<byte> messageBytes);
     }
 
-    public interface IMessageDispatcher<TMessageData> : IMessageDispatcher
+    public interface IEventDispatcher<TMessageData> : IMessageDispatcher
     {
         void Dispatch(ref TMessageData message); 
     }
@@ -347,18 +349,226 @@ namespace Stuff
         [BF.Bit] bool IsBroadcastable { get; set; }
         [BF.Bit] bool IsDirect { get; set; }
         [BF.Bit] bool IsSelfReference { get; set; }
-        [BF.Bits(29)] int Number { get; set; }
+        [BF.Rest] int Number { get; set; }
     }
 
     public readonly struct MessageTypeIndex<TMessageData>
     {
-
+        readonly MessageIdentifier identifier;
     }
 
-    public class BroadcastEventTable<TMessageData, THandler> : IMessageDispatcher<TMessageData>
-        where THandler : ISubscriber<TMessageData>
+    // Self sufficient data structure for events
+    public struct CopyOnWriteSet<TElement>
     {
-        public Dictionary<EntityId, SubscriberData<THandler>[]> _
+        public TElement[] _array;
+        public int _count;
+        public bool _hasBeenCopied;
+        /// Whether has been changed recently
+        public bool _isDirty;
+
+        public int Capacity => _array.Length;
+        public int Count => _count;
+
+        /// Sorts the array using the given comparer, unsets dirty. 
+        public void Tidy(System.Comparison<TElement> func)
+        {
+            if (!_isDirty)
+                return;
+            Elements.Sort(func);
+            _isDirty = false;
+        }
+
+        public Span<TElement> Elements => _array.AsSpan(0, _count);
+
+        public void Add(TElement element)
+        {
+            if (_count == Capacity)
+            {
+                Array.Resize(ref _array, Capacity * 2);
+                _hasBeenCopied = true;
+            }
+            _array[_count] = element;
+            _count++;
+            _isDirty = true;
+        }
+
+        public void Add(Span<TElement> elements)
+        {
+            // When adding a 0 length thing, we must not set the dirty flag.
+            if (elements.Length == 0)
+                return;
+            int newCount = elements.Length + _count;
+            if (newCount > Capacity)
+            {
+                Array.Resize(ref _array, Math.Max(newCount, Capacity * 2));
+                _hasBeenCopied = true;
+            }
+            elements.CopyTo(_array.AsSpan(_count, newCount - _count));
+            _count = newCount;
+            _isDirty = true;
+        }
+
+        public void Remove(int index)
+        {
+            Assert(index < _count);
+            if (index < _count - 1)
+            {
+                if (!_hasBeenCopied)
+                {
+                    var oldArray = _array;
+                    _array = new TElement[Capacity];
+                    Array.Copy(oldArray, _array, _count);
+                    _hasBeenCopied = true;
+                }
+                _array[index] = _array[_count - 1];
+                _isDirty = true;
+            }
+            _count--;
+        }
+
+        public void Remove<Eq>(in TElement item, Eq comparer) where Eq : IEqualityComparer<TElement>
+        {
+            int index = 0;
+            do { Assert(index < _count); }
+            while (comparer.Equals(item, _array[index++]));
+            Remove(index);
+        }
+
+        public void TryRemove<Eq>(in TElement item, Eq comparer) where Eq : IEqualityComparer<TElement>
+        {
+            for (int index = 0; index < _count; index++)
+            {
+                if (comparer.Equals(item, _array[index]))
+                {
+                    Remove(index);
+                    break;
+                }
+            }
+        }
+    }
+
+    public class ListWithDirtyFlag<TElement>
+    {
+        public TElement[] _array;
+        public int _count;
+        public bool _isDirty;
+        public int Capacity => _array.Length;
+        public int Count => _count;
+
+
+        public void Tidy(System.Comparison<TElement> func)
+        {
+            if (!_isDirty)
+                return;
+            _array.AsSpan().Sort(func);
+            _isDirty = false;
+        }
+
+        public void Add(TElement element)
+        {
+            if (_count == Capacity)
+                Array.Resize(ref _array, Capacity * 2);
+            _array[_count] = element;
+            _count++;
+            _isDirty = true;
+        }
+
+        public void Add(Span<TElement> elements)
+        {
+            if (elements.Length == 0)
+                return;
+            int newCount = elements.Length + _count;
+            if (newCount > Capacity)
+                Array.Resize(ref _array, Math.Max(newCount, Capacity * 2));
+            elements.CopyTo(_array.AsSpan(_count, newCount - _count));
+            _count = newCount;
+            _isDirty = true;
+        }
+
+        public void Remove(int index)
+        {
+            Assert(index < _count);
+            if (index < _count - 1)
+            {
+                _array[index] = _array[_count - 1];
+                _isDirty = true;
+            }
+            _count--;
+        }
+
+        public void Remove<Eq>(in TElement item, Eq comparer) where Eq : EqualityComparer<TElement>
+        {
+            int index = 0;
+            do { Assert(index < _count); }
+            while (comparer.Equals(item, _array[index++]));
+            Remove(index);
+        }
+
+        public void TryRemove<Eq>(in TElement item, Eq comparer) where Eq : IEqualityComparer<TElement>
+        {
+            for (int index = 0; index < _count; index++)
+            {
+                if (comparer.Equals(item, _array[index]))
+                {
+                    Remove(index);
+                    break;
+                }
+            }
+        }
+    }
+
+    // The types of messages:
+    //
+    // 1. (Only) Self reference. Means when this is called, only own handlers are called.
+    //    Can be handled on its own by the systems, stored in components.
+    //    If the default handlers are not going to change, and new ones may be added, this can be split
+    //    in two parts, then iterate both of them in lockstep by comparing the priorities.
+    //    Only the latter array will be ever modified (can be a list or even something fancier 
+    //    if it's expected to change much). Thing is, this can be handled by the systems, stored in the
+    //    components by those systems, and it's no big deal.
+    // 
+    // 2. Direct messages. Presumably, does not need any handlers????
+    //
+    // 3. Broadcasted messages. Means a message is dispatched and anyone can see it.
+    //    This can be split even further: the listeners may only be albe to listen to such message
+    //    from any entity, or a specfic entity. Of course, we could do filtering here (make all such messages
+    //    "global" and then just check if come from a given entity). I'm going to try something some fancy though.
+
+
+    // public readonly struct BroadcastableEventHandlerHandle
+    // {
+    //     public readonly EntityId broadcasterId;
+    //     public readonly uint ;
+    // }
+
+    // One such table will exist per broadcastable event.
+    // Listeners of broadcastable events do not respect priority.
+    // The handlers will be iterated by entities.
+    // Otherwise, the problem gets out of hand, because you need to keep the sets sorted
+
+    // Workflow:
+    // 1. Users push events into the message pipe.
+    // 2. The next event gets processed, its type get determined.
+    // 3. The associated handler gets called with the rest of the queue after the message header.
+    //    It takes the message part off the span, modifying it.
+    // 4. That thing know how to dispatch the message properly.
+    //      - if the message is direct, it does some predefined function probably.
+    //      - if the message is self-referencial, it finds the component of the entity
+    //        and calls the listener queue, or multiple queues (one readonly, one mutable).
+    //      - if the message is broadcastable, it reaches into the registry, grabs the data structure
+    //        with the listeners, calls the listeners. So listeners need to be associated with 
+    //        the given broadcaster. It would also call the all listeners.
+    //    So in the end, the data structure never calls the listeners. The initial message handler
+    //    always knows what things to invoke itself. It just stores something.
+    // 
+    // So let's do the simplest thing for now:
+    // 1. A dictionary for handler data (priority, callback, whatnot).
+    // 2. An array with isdirty flag.
+    public class BroadcastEventTable<THandlerCollection>
+    {
+        // Maps broadcaster id -> subscribed handlers
+        public Dictionary<EntityId, THandlerCollection> HandlerCollections;
+        public THandlerCollection GlobalHandlerCollection;
     }
 
     class Program
