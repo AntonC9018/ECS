@@ -1,6 +1,7 @@
 {
     "input": ".",
     "monolithicProject": "true",
-    "pluginPaths": ["plugin_cache"],
+    "pluginPaths": ["E:/Coding/C#/Bitfield/Bitfield/bin/Release/net5.0/Kari.Plugins.Bitfield.dll"],
+    "pluginConfigFilePath": "kari_plugins/packages.config",
     "rootNamespace": "Stuff"
 }
